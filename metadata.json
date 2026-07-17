@@ -1,0 +1,6 @@
+{
+  "callable": "SnakeApp",
+  "name": "Hex Snake",
+  "category": "Games",
+  "hidden": false
+}

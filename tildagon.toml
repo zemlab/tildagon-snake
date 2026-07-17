@@ -1,0 +1,13 @@
+[app]
+name = "Hex Snake"
+category = "Games"
+
+[entry]
+class = "SnakeApp"
+
+[metadata]
+author = "dan"
+license = "MIT"
+url = "https://github.com/zemlab/tildagon-snake"
+description = "Classic snake on a hexagonal grid - a button for each point of the badge."
+version = "1.0.0"
