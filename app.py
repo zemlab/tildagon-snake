@@ -1,13 +1,12 @@
 import math
 import random
 
-import app
-
 from app_components import YesNoDialog, clear_background
-from events.input import Buttons, BUTTON_TYPES
+from events.emote import EmoteNegativeEvent, EmotePositiveEvent
+from events.input import BUTTON_TYPES, Buttons
 from system.eventbus import eventbus
-from events.emote import EmotePositiveEvent, EmoteNegativeEvent
 
+import app
 
 # --- Hex grid geometry ------------------------------------------------
 #
