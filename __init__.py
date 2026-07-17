@@ -1,1 +1,1 @@
-from .app import SnakeApp
+from .app import SnakeApp as SnakeApp
