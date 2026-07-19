@@ -46,6 +46,7 @@ BUTTON_DIR = {
 }
 
 CANCEL_HOLD_MS = 1000   # hold CANCEL this long to quit
+FLASH_MS = 150          # how long a pressed button's wedge stays lit
 
 
 def axial_to_px(q, r):
@@ -65,6 +66,72 @@ def board_cells():
             if on_board(q, r):
                 cells.append((q, r))
     return cells
+
+
+# --- Precomputed static geometry ---------------------------------------
+#
+# All of this is fixed for the life of the program, so it's computed once
+# here rather than every draw() call. draw() runs every frame and every
+# millisecond it spends recomputing trig is a millisecond the input poll
+# isn't running, so cheap frames mean fewer missed button presses.
+
+# Unit-circle vertices of a flat-top hex; hex_path() just scales these.
+UNIT_HEX = [
+    (math.cos(math.radians(60 * i)), math.sin(math.radians(60 * i)))
+    for i in range(6)
+]
+
+BOARD_CELLS = board_cells()
+BOARD_PX = [axial_to_px(q, r) for (q, r) in BOARD_CELLS]
+
+# Angle (radians, screen space) each button's direction points at, derived
+# from the same DIRS/axial_to_px used for movement so the feedback wedges
+# always line up with where that direction actually moves the snake.
+BUTTON_ANGLE = {}
+for _name, _direction in BUTTON_DIR.items():
+    _dx, _dy = axial_to_px(*DIRS[_direction])
+    BUTTON_ANGLE[_name] = math.atan2(_dy, _dx)
+del _name, _direction, _dx, _dy
+
+# Furthest any drawn board hex actually reaches from center: every vertex
+# of every board tile, exact (not a guessed radius), so the wedge ring
+# can't overlap the board no matter which axis it's measured along.
+_BOARD_TILE_SIZE = HEX_SIZE - 1  # matches the tile radius used in draw()
+
+
+def _hypot(x, y):
+    # math.hypot() doesn't exist on MicroPython.
+    return math.sqrt(x * x + y * y)
+
+
+BOARD_REACH_PX = max(
+    _hypot(cx + _BOARD_TILE_SIZE * ux, cy + _BOARD_TILE_SIZE * uy)
+    for (cx, cy) in BOARD_PX
+    for (ux, uy) in UNIT_HEX
+)
+
+WEDGE_INNER_R = BOARD_REACH_PX + 4     # just outside the board
+WEDGE_OUTER_R = 118                    # inside the ~120px screen edge
+WEDGE_HALF_SPAN = math.radians(25)     # wedge covers +/- this much
+WEDGE_ARC_STEPS = 4                    # line segments approximating each arc
+
+
+def _wedge_polygon(angle):
+    # Outer arc one way, inner arc back the other way, closed into a ring
+    # segment. Computed once per button at import time; draw() just walks
+    # the resulting point list.
+    a0, a1 = angle - WEDGE_HALF_SPAN, angle + WEDGE_HALF_SPAN
+    points = []
+    for i in range(WEDGE_ARC_STEPS + 1):
+        t = a0 + (a1 - a0) * i / WEDGE_ARC_STEPS
+        points.append((WEDGE_OUTER_R * math.cos(t), WEDGE_OUTER_R * math.sin(t)))
+    for i in range(WEDGE_ARC_STEPS + 1):
+        t = a1 - (a1 - a0) * i / WEDGE_ARC_STEPS
+        points.append((WEDGE_INNER_R * math.cos(t), WEDGE_INNER_R * math.sin(t)))
+    return points
+
+
+WEDGE_POLY = {name: _wedge_polygon(angle) for name, angle in BUTTON_ANGLE.items()}
 
 
 def _wrap_bounds(f):
@@ -98,15 +165,27 @@ def wrapped_step(q, r, direction):
 
 def hex_path(ctx, cx, cy, size=HEX_SIZE):
     # Flat-top hex: vertices at 0, 60, 120, ... degrees.
-    for i in range(6):
-        angle = math.radians(60 * i)
-        x = cx + size * math.cos(angle)
-        y = cy + size * math.sin(angle)
+    for i, (ux, uy) in enumerate(UNIT_HEX):
+        x = cx + size * ux
+        y = cy + size * uy
         if i == 0:
             ctx.move_to(x, y)
         else:
             ctx.line_to(x, y)
     ctx.close_path()
+
+
+def wedge_path(ctx, name):
+    for i, (x, y) in enumerate(WEDGE_POLY[name]):
+        if i == 0:
+            ctx.move_to(x, y)
+        else:
+            ctx.line_to(x, y)
+    ctx.close_path()
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
 
 
 class SnakeApp(app.App):
@@ -125,6 +204,7 @@ class SnakeApp(app.App):
         self.score = 0
         self.dialog = None
         self.game = "ON"
+        self.flash = {name: 0.0 for name in BUTTON_DIR}
         self._spawn_food()
 
     def _exit(self):
@@ -133,15 +213,21 @@ class SnakeApp(app.App):
         self.minimise()
 
     def _spawn_food(self):
-        cells = board_cells()
         occupied = set(self.snake) | set(self.food)
-        candidates = [c for c in cells if c not in occupied]
+        candidates = [c for c in BOARD_CELLS if c not in occupied]
         if candidates:
             self.food.append(random.choice(candidates))
 
     def update(self, delta):
-        # Hold CANCEL to quit; a short tap just steers NW.
+        for name in self.flash:
+            if self.flash[name] > 0:
+                self.flash[name] = max(0.0, self.flash[name] - delta)
+
+        # Hold CANCEL to quit; a short tap just steers NW. This reads
+        # level state (get), not the edge-triggered steer below, so a
+        # held button keeps accumulating instead of getting reset.
         if self.button_states.get(BUTTON_TYPES["CANCEL"]):
+            self.flash["CANCEL"] = FLASH_MS
             self.cancel_held_ms += delta
             if self.cancel_held_ms >= CANCEL_HOLD_MS:
                 self.button_states.clear()
@@ -153,8 +239,12 @@ class SnakeApp(app.App):
 
         if self.game == "ON":
             for name, direction in BUTTON_DIR.items():
-                if self.button_states.get(BUTTON_TYPES[name]):
-                    self.button_states.clear()
+                # Edge-triggered: fires once per press, self-latches per
+                # button, so handling one button doesn't wipe every other
+                # button's in-flight state (that used to break the CANCEL
+                # hold-to-quit timer above).
+                if self.button_states.pressed(BUTTON_TYPES[name]):
+                    self.flash[name] = FLASH_MS
                     if direction != OPPOSITE.get(self.direction, ""):
                         self.next_direction = direction
                     break
@@ -199,9 +289,21 @@ class SnakeApp(app.App):
 
         ctx.save()
 
+        # Button feedback ring: a faint wedge at each of the 6 button
+        # positions, always visible as a control-layout guide, brightening
+        # to an accent colour on press and fading back out over FLASH_MS.
+        base = (0.15, 0.15, 0.2)
+        bright = (1.0, 0.8, 0.2)
+        for name in BUTTON_DIR:
+            t = self.flash.get(name, 0.0) / FLASH_MS
+            ctx.rgb(_lerp(base[0], bright[0], t),
+                    _lerp(base[1], bright[1], t),
+                    _lerp(base[2], bright[2], t))
+            wedge_path(ctx, name)
+            ctx.fill()
+
         # Board.
-        for q, r in board_cells():
-            cx, cy = axial_to_px(q, r)
+        for cx, cy in BOARD_PX:
             ctx.rgb(0.08, 0.08, 0.1)
             hex_path(ctx, cx, cy, HEX_SIZE - 1)
             ctx.fill()

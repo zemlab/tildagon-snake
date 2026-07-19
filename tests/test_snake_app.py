@@ -68,10 +68,15 @@ def test_button_steers_next_direction(snake_module):
     game = snake_module.SnakeApp()
     game.direction = "SE"  # not opposite of "N"
     button = _button_for(snake_module, "N")
-    game.button_states.pressed.add(button)
+    game.button_states.held.add(button)
     game.update(delta=0)
     assert game.next_direction == "N"
-    assert game.button_states.get(button) is False  # consumed
+    # Still physically held (level state), but the steer is edge-triggered
+    # so a second update while held shouldn't re-fire it.
+    assert game.button_states.get(button) is True
+    game.next_direction = ""
+    game.update(delta=0)
+    assert game.next_direction == ""
 
 
 def test_cannot_reverse_directly_into_self(snake_module):
@@ -79,7 +84,7 @@ def test_cannot_reverse_directly_into_self(snake_module):
     game.direction = "N"
     game.next_direction = ""
     button = _button_for(snake_module, snake_module.OPPOSITE["N"])
-    game.button_states.pressed.add(button)
+    game.button_states.held.add(button)
     game.update(delta=0)
     assert game.next_direction == ""
 
@@ -98,7 +103,7 @@ def test_cancel_tap_steers_instead_of_quitting(snake_module):
     game = snake_module.SnakeApp()
     game.direction = "S"
     cancel_button = _button_for(snake_module, "NW")  # CANCEL maps to NW
-    game.button_states.pressed.add(cancel_button)
+    game.button_states.held.add(cancel_button)
     game.update(delta=snake_module.CANCEL_HOLD_MS - 1)
     assert game.minimised is False
     assert game.next_direction == "NW"
@@ -107,6 +112,35 @@ def test_cancel_tap_steers_instead_of_quitting(snake_module):
 def test_holding_cancel_past_threshold_exits(snake_module):
     game = snake_module.SnakeApp()
     cancel_button = _button_for(snake_module, "NW")
-    game.button_states.pressed.add(cancel_button)
+    game.button_states.held.add(cancel_button)
     game.update(delta=snake_module.CANCEL_HOLD_MS)
     assert game.minimised is True
+
+
+def test_holding_cancel_across_multiple_frames_exits(snake_module):
+    # Regression: steering used to call button_states.clear() on every
+    # consumed press, which wiped CANCEL's level state too (CANCEL maps to
+    # NW, so it was consumed by the same steer branch) and reset the hold
+    # timer every frame. Spread the hold over several small updates, the
+    # way real per-tick polling would, instead of one big delta.
+    game = snake_module.SnakeApp()
+    cancel_button = _button_for(snake_module, "NW")
+    game.button_states.held.add(cancel_button)
+    per_frame = 50
+    frames = snake_module.CANCEL_HOLD_MS // per_frame + 1
+    for _ in range(frames):
+        game.update(delta=per_frame)
+    assert game.minimised is True
+
+
+def test_flash_set_on_press_and_decays(snake_module):
+    game = snake_module.SnakeApp()
+    game.direction = "SE"  # not opposite of "N"
+    button = _button_for(snake_module, "N")
+    game.button_states.held.add(button)
+    game.update(delta=0)
+    assert game.flash["UP"] == snake_module.FLASH_MS
+
+    game.button_states.held.discard(button)
+    game.update(delta=snake_module.FLASH_MS)
+    assert game.flash["UP"] == 0
