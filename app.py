@@ -97,8 +97,15 @@ del _name, _direction, _dx, _dy
 # of every board tile, exact (not a guessed radius), so the wedge ring
 # can't overlap the board no matter which axis it's measured along.
 _BOARD_TILE_SIZE = HEX_SIZE - 1  # matches the tile radius used in draw()
+
+
+def _hypot(x, y):
+    # math.hypot() doesn't exist on MicroPython.
+    return math.sqrt(x * x + y * y)
+
+
 BOARD_REACH_PX = max(
-    math.hypot(cx + _BOARD_TILE_SIZE * ux, cy + _BOARD_TILE_SIZE * uy)
+    _hypot(cx + _BOARD_TILE_SIZE * ux, cy + _BOARD_TILE_SIZE * uy)
     for (cx, cy) in BOARD_PX
     for (ux, uy) in UNIT_HEX
 )
